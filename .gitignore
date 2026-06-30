@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+app/outputs/
+
+*.tif
+*.tiff
+
+.venv/
+venv/
