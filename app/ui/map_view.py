@@ -13,6 +13,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 class MapView(QWebEngineView):
     homeSelected = Signal(float, float)
     homeMoved = Signal(int, float, float)
+    missionContextRequested = Signal(int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -75,6 +76,17 @@ class MapView(QWebEngineView):
             try:
                 latitude, longitude, *_ = title.removeprefix("home:").split(",")
                 self.homeSelected.emit(float(latitude), float(longitude))
+            except (TypeError, ValueError):
+                pass
+            return
+        if title.startswith("missioncontext:"):
+            try:
+                zone_id, mission_id, *_ = title.removeprefix(
+                    "missioncontext:"
+                ).split(",")
+                self.missionContextRequested.emit(
+                    int(zone_id), int(mission_id)
+                )
             except (TypeError, ValueError):
                 pass
 
@@ -181,6 +193,14 @@ function makeFeatureLayer(feature) {
         layer.bindTooltip('Крупная зона ' + p.zone_id + ' / Home ' + p.home_id);
       } else if (p.kind === 'zone') {
         layer.bindTooltip('Зона ' + p.zone_id + ' / миссия ' + p.mission_id);
+      }
+      if (['zone','profile','route'].includes(p.kind)) {
+        layer.on('contextmenu', event => {
+          L.DomEvent.preventDefault(event.originalEvent);
+          L.DomEvent.stopPropagation(event.originalEvent);
+          document.title = 'missioncontext:' + p.zone_id + ',' +
+            p.mission_id + ',' + Date.now();
+        });
       }
     },
     pointToLayer:(f, latlng) => {

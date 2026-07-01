@@ -15,7 +15,7 @@ from .kml_exporter import (
     export_profiles_kml,
     export_route_kml,
 )
-from .models import PlanningResult
+from .models import Mission, OperationalZone, PlanningResult
 from .qgc_exporter import export_qgc_plan
 
 
@@ -57,77 +57,14 @@ def export_all(result: PlanningResult, output_directory: str | Path) -> list[Pat
                 mission_directory = (
                     zone_directory / f"mission_{mission.id:03d}"
                 )
-                mission_directory.mkdir(parents=True, exist_ok=True)
-                basename = (
-                    f"zone_{zone.id:03d}_mission_{mission.id:03d}"
-                )
-                created.append(
-                    export_qgc_plan(
-                        mission_directory / f"{basename}.plan",
+                created.extend(
+                    _export_mission_files(
+                        result,
+                        zone,
                         mission,
-                        zone.home.point,
-                        result.settings.working_crs,
-                        result.settings.altitude_m,
-                        result.settings.speed_mps,
-                        result.settings.altitude_mode,
-                        zone.home.elevation_m,
-                        result.settings.mission_mode,
-                        result.settings.profile_spacing_m,
-                        result.settings.azimuth_deg,
-                        result.settings.climb_speed_mps,
-                        result.settings.descent_speed_mps,
-                        result.settings.terrain_adjust_tolerance_m,
+                        mission_directory,
                     )
                 )
-                created.append(
-                    export_profiles_kml(
-                        mission_directory / f"{basename}_grid.kml",
-                        mission.profiles,
-                        result.settings.working_crs,
-                        f"Grid {basename}",
-                    )
-                )
-                if mission.zone is not None and not mission.zone.is_empty:
-                    created.append(
-                        export_polygon_kml(
-                            mission_directory / f"{basename}_polygon.kml",
-                            mission.zone,
-                            result.settings.working_crs,
-                            f"Polygon {basename}",
-                        )
-                    )
-                route_points = [
-                    zone.home.point,
-                    *mission.route_points,
-                    zone.home.point,
-                ]
-                route_terrain = (
-                    mission.terrain_elevations_m
-                    if mission.terrain_elevations_m
-                    else [zone.home.elevation_m] * len(mission.route_points)
-                )
-                route_altitudes = [
-                    zone.home.elevation_m + result.settings.altitude_m,
-                    *[
-                        elevation + result.settings.altitude_m
-                        for elevation in route_terrain
-                    ],
-                    zone.home.elevation_m + result.settings.altitude_m,
-                ]
-                created.append(
-                    export_route_kml(
-                        mission_directory / f"{basename}_route.kml",
-                        route_points,
-                        route_altitudes,
-                        result.settings.working_crs,
-                        f"Route {basename}",
-                    )
-                )
-                mission_summary = mission_directory / f"{basename}_summary.csv"
-                _write_single_mission_summary(
-                    mission_summary, zone, mission, result
-                )
-                created.append(mission_summary)
     else:
         for mission in result.missions:
             mission_directory = zones_root / "zone_001" / f"mission_{mission.id:03d}"
@@ -357,6 +294,125 @@ def export_all(result: PlanningResult, output_directory: str | Path) -> list[Pat
                     ]
                 )
     created.append(summary_path)
+    return created
+
+
+def export_mission(
+    result: PlanningResult,
+    zone_id: int,
+    mission_id: int,
+    output_directory: str | Path,
+) -> list[Path]:
+    zone = next((item for item in result.zones if item.id == zone_id), None)
+    if zone is None:
+        raise ValueError(f"Зона {zone_id} не найдена.")
+    mission = next(
+        (item for item in zone.missions if item.id == mission_id),
+        None,
+    )
+    if mission is None:
+        raise ValueError(
+            f"Миссия {zone_id}.{mission_id} не найдена."
+        )
+    if mission.status.startswith("Недопустимо"):
+        raise ValueError(
+            f"Экспорт миссии {zone_id}.{mission_id} запрещён: "
+            f"{mission.status}"
+        )
+    if mission.zone is None or mission.zone.is_empty:
+        raise ValueError(
+            f"У миссии {zone_id}.{mission_id} отсутствует полигон."
+        )
+    if not mission.profiles:
+        raise ValueError(
+            f"У миссии {zone_id}.{mission_id} отсутствуют профили."
+        )
+    if not mission.route_points:
+        raise ValueError(
+            f"У миссии {zone_id}.{mission_id} отсутствует маршрут."
+        )
+
+    basename = f"zone_{zone.id:03d}_mission_{mission.id:03d}"
+    mission_directory = Path(output_directory) / basename
+    return _export_mission_files(
+        result,
+        zone,
+        mission,
+        mission_directory,
+    )
+
+
+def _export_mission_files(
+    result: PlanningResult,
+    zone: OperationalZone,
+    mission: Mission,
+    mission_directory: Path,
+) -> list[Path]:
+    mission_directory.mkdir(parents=True, exist_ok=True)
+    basename = f"zone_{zone.id:03d}_mission_{mission.id:03d}"
+    created = [
+        export_qgc_plan(
+            mission_directory / f"{basename}.plan",
+            mission,
+            zone.home.point,
+            result.settings.working_crs,
+            result.settings.altitude_m,
+            result.settings.speed_mps,
+            result.settings.altitude_mode,
+            zone.home.elevation_m,
+            result.settings.mission_mode,
+            result.settings.profile_spacing_m,
+            result.settings.azimuth_deg,
+            result.settings.climb_speed_mps,
+            result.settings.descent_speed_mps,
+            result.settings.terrain_adjust_tolerance_m,
+        ),
+        export_profiles_kml(
+            mission_directory / f"{basename}_grid.kml",
+            mission.profiles,
+            result.settings.working_crs,
+            f"Grid {basename}",
+        ),
+    ]
+    if mission.zone is not None and not mission.zone.is_empty:
+        created.append(
+            export_polygon_kml(
+                mission_directory / f"{basename}_polygon.kml",
+                mission.zone,
+                result.settings.working_crs,
+                f"Polygon {basename}",
+            )
+        )
+    route_points = [
+        zone.home.point,
+        *mission.route_points,
+        zone.home.point,
+    ]
+    route_terrain = (
+        mission.terrain_elevations_m
+        if mission.terrain_elevations_m
+        else [zone.home.elevation_m] * len(mission.route_points)
+    )
+    route_altitudes = [
+        zone.home.elevation_m + result.settings.altitude_m,
+        *[
+            elevation + result.settings.altitude_m
+            for elevation in route_terrain
+        ],
+        zone.home.elevation_m + result.settings.altitude_m,
+    ]
+    created.append(
+        export_route_kml(
+            mission_directory / f"{basename}_route.kml",
+            route_points,
+            route_altitudes,
+            result.settings.working_crs,
+            f"Route {basename}",
+        )
+    )
+    mission_summary = mission_directory / f"{basename}_summary.csv"
+    _write_single_mission_summary(mission_summary, zone, mission, result)
+    created.append(mission_summary)
     return created
 
 

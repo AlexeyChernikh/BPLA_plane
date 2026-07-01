@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -31,7 +32,7 @@ from pyproj import CRS, Transformer
 from shapely.geometry import LineString, mapping
 from shapely.ops import transform
 
-from app.core.exporter import export_all
+from app.core.exporter import export_all, export_mission
 from app.core.models import PlannerSettings, PlanningResult
 from app.core.planner import plan_terrain_missions
 from app.core.polygon_loader import load_polygon
@@ -100,6 +101,38 @@ class ExportWorker(QObject):
         try:
             self.signals.progress.emit("Экспорт файлов…")
             created = export_all(self._result, self._directory)
+            self.signals.finished.emit(created)
+        except Exception as error:
+            self.signals.failed.emit(error)
+
+
+class MissionExportWorker(QObject):
+    def __init__(
+        self,
+        result: PlanningResult,
+        zone_id: int,
+        mission_id: int,
+        directory: Path,
+    ) -> None:
+        super().__init__()
+        self.signals = WorkerSignals()
+        self._result = result
+        self._zone_id = zone_id
+        self._mission_id = mission_id
+        self._directory = directory
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.signals.progress.emit(
+                f"Экспорт миссии {self._zone_id}.{self._mission_id}…"
+            )
+            created = export_mission(
+                self._result,
+                self._zone_id,
+                self._mission_id,
+                self._directory,
+            )
             self.signals.finished.emit(created)
         except Exception as error:
             self.signals.failed.emit(error)
@@ -306,6 +339,9 @@ class MainWindow(QMainWindow):
 
         self.map_view = MapView()
         self.map_view.homeMoved.connect(self.move_home)
+        self.map_view.missionContextRequested.connect(
+            self._show_map_mission_context_menu
+        )
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -331,6 +367,10 @@ class MainWindow(QMainWindow):
             ]
         )
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            self._show_mission_context_menu
+        )
         layout.addWidget(self.table, 1)
         self.statusBar().showMessage("Готово")
 
@@ -588,6 +628,93 @@ class MainWindow(QMainWindow):
             f"Создано файлов: {len(paths)}\n{directory}",
         )
 
+    def _show_mission_context_menu(self, position) -> None:
+        item = self.table.itemAt(position)
+        if item is None or self.result is None:
+            return
+        identity_item = self.table.item(item.row(), 0)
+        identity = identity_item.data(Qt.UserRole) if identity_item else None
+        if not identity:
+            return
+        zone_id, mission_id = identity
+        self._show_mission_export_menu(
+            zone_id,
+            mission_id,
+            self.table.viewport().mapToGlobal(position),
+            self.table,
+        )
+
+    def _show_map_mission_context_menu(
+        self,
+        zone_id: int,
+        mission_id: int,
+    ) -> None:
+        self._show_mission_export_menu(
+            zone_id,
+            mission_id,
+            QCursor.pos(),
+            self.map_view,
+        )
+
+    def _show_mission_export_menu(
+        self,
+        zone_id: int,
+        mission_id: int,
+        global_position,
+        parent: QWidget,
+    ) -> None:
+        if self.result is None:
+            return
+        menu = QMenu(parent)
+        export_action = menu.addAction("Экспортировать миссию")
+        export_action.setEnabled(not self._busy)
+        selected = menu.exec(global_position)
+        if selected == export_action:
+            self._export_single_mission(zone_id, mission_id)
+
+    def _export_single_mission(self, zone_id: int, mission_id: int) -> None:
+        if self._busy or self.result is None:
+            return
+        default = Path(__file__).resolve().parents[1] / "outputs"
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            f"Экспорт миссии {zone_id}.{mission_id}",
+            str(default),
+        )
+        if not directory:
+            return
+        worker = MissionExportWorker(
+            self.result,
+            zone_id,
+            mission_id,
+            Path(directory),
+        )
+        self._start_worker(
+            worker,
+            lambda created: self._finish_single_export(
+                created,
+                Path(directory),
+                zone_id,
+                mission_id,
+            ),
+        )
+
+    def _finish_single_export(
+        self,
+        created: object,
+        directory: Path,
+        zone_id: int,
+        mission_id: int,
+    ) -> None:
+        paths = list(created)  # type: ignore[arg-type]
+        message = f"Миссия {zone_id}.{mission_id}: создано {len(paths)} файлов"
+        self._clear_busy(message)
+        QMessageBox.information(
+            self,
+            "Экспорт миссии завершён",
+            f"{message}\n{directory}",
+        )
+
     def _show_loaded_polygon(self, geometry, crs: CRS) -> None:
         to_wgs = Transformer.from_crs(crs, 4326, always_xy=True)
         feature = {
@@ -623,7 +750,9 @@ class MainWindow(QMainWindow):
                 mission.status,
             )
             for column, value in enumerate(values):
-                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, (zone.id, mission.id))
+                self.table.setItem(row, column, item)
         self.map_view.show_geojson(
             _result_geojson(self.result),
             terrain_overlay=self.terrain_overlay,
