@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -33,6 +35,12 @@ from app.core.exporter import export_all
 from app.core.models import PlannerSettings, PlanningResult
 from app.core.planner import plan_terrain_missions
 from app.core.polygon_loader import load_polygon
+from app.core.project_store import (
+    PROJECT_SUFFIX,
+    ProjectSession,
+    load_project,
+    save_project,
+)
 from app.core.terrain import TerrainModel
 
 from .map_view import MapView
@@ -97,6 +105,65 @@ class ExportWorker(QObject):
             self.signals.failed.emit(error)
 
 
+class ProjectSaveWorker(QObject):
+    def __init__(
+        self,
+        project_path: Path,
+        result: PlanningResult,
+        dem_path: Path,
+    ) -> None:
+        super().__init__()
+        self.signals = WorkerSignals()
+        self._project_path = project_path
+        self._result = result
+        self._dem_path = dem_path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.signals.progress.emit("Сохранение данных проекта…")
+            path = save_project(self._project_path, self._result, self._dem_path)
+            self.signals.finished.emit(path)
+        except Exception as error:
+            self.signals.failed.emit(error)
+
+
+class ProjectLoadWorker(QObject):
+    def __init__(self, project_path: Path) -> None:
+        super().__init__()
+        self.signals = WorkerSignals()
+        self._project_path = project_path
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.signals.progress.emit("Чтение данных проекта…")
+            session = load_project(self._project_path)
+            if session.result is None:
+                self.signals.progress.emit(
+                    "Пересчёт старого формата проекта…"
+                )
+                result = plan_terrain_missions(
+                    session.polygon_path,
+                    session.dem_path,
+                    session.settings,
+                    session.homes_wgs84,
+                    session.forced_grid_sizes,
+                )
+            else:
+                self.signals.progress.emit("Восстановление рассчитанных миссий…")
+                result = session.result
+            terrain = TerrainModel(
+                session.dem_path,
+                session.settings.working_crs,
+                result.polygon.geometry,
+            )
+            self.signals.progress.emit("Обновление карты…")
+            self.signals.finished.emit((session, result, terrain.preview_overlay()))
+        except Exception as error:
+            self.signals.failed.emit(error)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -106,6 +173,8 @@ class MainWindow(QMainWindow):
         self.dem_path: Path | None = None
         self.result: PlanningResult | None = None
         self.terrain_overlay: tuple[str, list[list[float]]] | None = None
+        self.project_path: Path | None = None
+        self._project_work_directory: Path | None = None
         self._busy = False
         self._worker_thread: QThread | None = None
         self._worker: QObject | None = None
@@ -121,6 +190,16 @@ class MainWindow(QMainWindow):
         controls.setMaximumWidth(430)
         controls_layout = QVBoxLayout(controls)
 
+        self.open_project_button = QPushButton("Открыть проект")
+        self.open_project_button.clicked.connect(self.open_project)
+        self.open_project_button.setToolTip(
+            "Открыть сохранённую сессию со всеми исходными данными."
+        )
+        self.save_project_button = QPushButton("Сохранить проект")
+        self.save_project_button.clicked.connect(self.save_project)
+        self.save_project_button.setToolTip(
+            "Сохранить полигон, DEM, настройки, Home и параметры сетки."
+        )
         self.load_polygon_button = QPushButton("Загрузить полигон")
         self.load_polygon_button.clicked.connect(self.load_polygon_file)
         self.load_polygon_button.setToolTip(
@@ -135,6 +214,8 @@ class MainWindow(QMainWindow):
         )
         self.dem_label = QLabel("DEM не выбран")
         self.dem_label.setWordWrap(True)
+        controls_layout.addWidget(self.open_project_button)
+        controls_layout.addWidget(self.save_project_button)
         controls_layout.addWidget(self.load_polygon_button)
         controls_layout.addWidget(self.polygon_label)
         controls_layout.addWidget(self.load_dem_button)
@@ -288,6 +369,80 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.exec()
+
+    def open_project(self) -> None:
+        if self._busy:
+            self.statusBar().showMessage("Дождитесь завершения текущей операции")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Открыть проект",
+            str(self.project_path.parent if self.project_path else Path.cwd()),
+            "Проект BPLA (*.bpla)",
+        )
+        if filename:
+            self._start_worker(
+                ProjectLoadWorker(Path(filename)),
+                self._finish_open_project,
+            )
+
+    def _finish_open_project(self, loaded: object) -> None:
+        session, result, overlay = loaded  # type: ignore[misc]
+        assert isinstance(session, ProjectSession)
+        old_work_directory = self._project_work_directory
+        self._project_work_directory = session.polygon_path.parent
+        self.project_path = session.project_path
+        self.polygon_path = session.polygon_path
+        self.dem_path = session.dem_path
+        self.result = result
+        self.terrain_overlay = overlay
+        self._apply_settings(session.settings)
+        self.polygon_label.setText(f"{self.project_path.name}: полигон проекта")
+        self.dem_label.setText(f"{self.project_path.name}: DEM проекта")
+        self._show_result()
+        self.setWindowTitle(
+            f"Планировщик миссий QGroundControl — {self.project_path.name}"
+        )
+        self._clear_busy(
+            f"Проект открыт: Home {len(self.result.takeoff_sites)}, "
+            f"миссий {len(self.result.missions)}"
+        )
+        if (
+            old_work_directory is not None
+            and old_work_directory != self._project_work_directory
+        ):
+            shutil.rmtree(old_work_directory, ignore_errors=True)
+
+    def save_project(self) -> None:
+        if self._busy:
+            self.statusBar().showMessage("Дождитесь завершения текущей операции")
+            return
+        if self.result is None or self.dem_path is None:
+            QMessageBox.warning(
+                self,
+                "Нет расчёта",
+                "Сначала загрузите данные и сгенерируйте миссии.",
+            )
+            return
+        default = self.project_path or Path.cwd() / f"mission_project{PROJECT_SUFFIX}"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить проект",
+            str(default),
+            "Проект BPLA (*.bpla)",
+        )
+        if filename:
+            self._start_worker(
+                ProjectSaveWorker(Path(filename), self.result, self.dem_path),
+                self._finish_save_project,
+            )
+
+    def _finish_save_project(self, saved: object) -> None:
+        self.project_path = Path(saved)  # type: ignore[arg-type]
+        self.setWindowTitle(
+            f"Планировщик миссий QGroundControl — {self.project_path.name}"
+        )
+        self._clear_busy(f"Проект сохранён: {self.project_path}")
 
     def load_polygon_file(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -478,6 +633,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ошибка")
         QMessageBox.critical(self, "Ошибка", str(error))
 
+    def _apply_settings(self, settings: PlannerSettings) -> None:
+        self.crs.setText(settings.working_crs.to_string())
+        self.azimuth.setValue(settings.azimuth_deg)
+        self.spacing.setValue(settings.profile_spacing_m)
+        self.altitude.setValue(settings.altitude_m)
+        self.speed.setValue(settings.speed_mps)
+        self.flight_time.setValue(settings.max_flight_time_min)
+        self.reserve.setValue(settings.battery_reserve_percent)
+        self.waypoint_step.setValue(settings.waypoint_step_m)
+        self.extension.setValue(settings.profile_extension_m)
+        self.search_buffer.setValue(settings.home_search_buffer_m)
+        self.max_zone_side.setValue(settings.max_zone_side_m)
+        self.max_mission_side.setValue(settings.max_mission_side_m)
+        self.climb_speed.setValue(settings.climb_speed_mps)
+        self.descent_speed.setValue(settings.descent_speed_mps)
+        self.terrain_tolerance.setValue(settings.terrain_adjust_tolerance_m)
+        self.relief_warning.setValue(settings.terrain_warning_m)
+        self.route_mode.setCurrentText(settings.route_mode)
+        self.altitude_mode.setCurrentIndex(
+            max(0, self.altitude_mode.findData(settings.altitude_mode))
+        )
+        self.mission_mode.setCurrentIndex(
+            max(0, self.mission_mode.findData(settings.mission_mode))
+        )
+
     def _set_busy(self, message: str) -> None:
         self._busy = True
         self.progress_label.setText(message)
@@ -486,6 +666,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
         self.load_polygon_button.setEnabled(False)
         self.load_dem_button.setEnabled(False)
+        self.open_project_button.setEnabled(False)
+        self.save_project_button.setEnabled(False)
         self.generate_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.map_view.setEnabled(False)
@@ -497,6 +679,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.load_polygon_button.setEnabled(True)
         self.load_dem_button.setEnabled(True)
+        self.open_project_button.setEnabled(True)
+        self.save_project_button.setEnabled(True)
         self.generate_button.setEnabled(True)
         self.export_button.setEnabled(True)
         self.map_view.setEnabled(True)
@@ -540,6 +724,11 @@ class MainWindow(QMainWindow):
     def _cleanup_worker(self) -> None:
         self._worker = None
         self._worker_thread = None
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._project_work_directory is not None:
+            shutil.rmtree(self._project_work_directory, ignore_errors=True)
+        super().closeEvent(event)
 
 
 def _spin(
