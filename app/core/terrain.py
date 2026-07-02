@@ -63,6 +63,7 @@ class TerrainModel:
             abs(float(self.transform.a)),
             abs(float(self.transform.e)),
         )
+        self._sample_cache: dict[tuple[float, float], TerrainSample] = {}
         if required_geometry is not None:
             self.validate_coverage(required_geometry)
 
@@ -81,7 +82,12 @@ class TerrainModel:
             raise ValueError("Внутри полигона DEM содержит NoData.")
 
     def sample(self, point: Point) -> TerrainSample:
-        col_f, row_f = (~self.transform) * (point.x, point.y)
+        key = (float(point.x), float(point.y))
+        cached = self._sample_cache.get(key)
+        if cached is not None:
+            return cached
+
+        col_f, row_f = (~self.transform) * key
         col0, row0 = math.floor(col_f), math.floor(row_f)
         if row0 < 0 or col0 < 0 or row0 + 1 >= self.height or col0 + 1 >= self.width:
             raise ValueError("Точка находится за пределами DEM.")
@@ -100,7 +106,9 @@ class TerrainModel:
         local = self.data[row - 1 : row + 2, col - 1 : col + 2]
         valid = local[np.isfinite(local)]
         if valid.size < 4:
-            return TerrainSample(elevation, 90.0, float("inf"))
+            sample = TerrainSample(elevation, 90.0, float("inf"))
+            self._sample_cache[key] = sample
+            return sample
         dz_dy, dz_dx = np.gradient(
             np.where(np.isfinite(local), local, elevation),
             self.resolution[1],
@@ -109,7 +117,9 @@ class TerrainModel:
         slope = math.degrees(
             math.atan(float(np.nanmax(np.hypot(dz_dx, dz_dy))))
         )
-        return TerrainSample(elevation, slope, float(valid.max() - valid.min()))
+        sample = TerrainSample(elevation, slope, float(valid.max() - valid.min()))
+        self._sample_cache[key] = sample
+        return sample
 
     def elevations(self, points: list[Point]) -> list[float]:
         return [self.sample(point).elevation_m for point in points]
