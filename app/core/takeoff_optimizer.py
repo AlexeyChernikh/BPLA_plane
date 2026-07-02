@@ -166,6 +166,7 @@ def profiles_for_zone(
     zone: Polygon | MultiPolygon,
     maximum_length_m: float,
     start_id: int,
+    extension_m: float = 0.0,
 ) -> list[Profile]:
     clipped: list[Profile] = []
     identifier = start_id
@@ -173,6 +174,23 @@ def profiles_for_zone(
         for line in collect_lines(profile.geometry.intersection(zone)):
             if line.length <= 0:
                 continue
+            if extension_m > 0:
+                coordinates = list(line.coords)
+                start_dx = coordinates[1][0] - coordinates[0][0]
+                start_dy = coordinates[1][1] - coordinates[0][1]
+                start_length = math.hypot(start_dx, start_dy)
+                end_dx = coordinates[-1][0] - coordinates[-2][0]
+                end_dy = coordinates[-1][1] - coordinates[-2][1]
+                end_length = math.hypot(end_dx, end_dy)
+                coordinates[0] = (
+                    coordinates[0][0] - start_dx / start_length * extension_m,
+                    coordinates[0][1] - start_dy / start_length * extension_m,
+                )
+                coordinates[-1] = (
+                    coordinates[-1][0] + end_dx / end_length * extension_m,
+                    coordinates[-1][1] + end_dy / end_length * extension_m,
+                )
+                line = LineString(coordinates)
             clipped.extend(
                 split_profiles(
                     [Profile(identifier, profile.offset_m, line)],

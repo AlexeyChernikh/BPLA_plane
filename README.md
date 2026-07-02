@@ -88,6 +88,8 @@ zones/
       zone_001_mission_001_route.kml
       zone_001_mission_001_summary.csv
 summary/
+  all_mission_polygons.kml
+  missions_map.png
   takeoff_points.gpkg
   operational_zones.gpkg
   mission_zones.gpkg

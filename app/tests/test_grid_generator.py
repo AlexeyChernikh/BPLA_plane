@@ -4,6 +4,7 @@ import pytest
 from shapely.geometry import MultiPolygon, Polygon
 
 from app.core.grid_generator import generate_profiles
+from app.core.takeoff_optimizer import profiles_for_zone
 
 
 def test_profiles_use_exact_common_grid_spacing() -> None:
@@ -28,6 +29,23 @@ def test_extension_is_added_to_both_ends() -> None:
         assert extended_by_offset[offset].geometry.length == pytest.approx(
             original_by_offset[offset].geometry.length + 20
         )
+
+
+def test_extension_is_added_after_clipping_to_each_mission() -> None:
+    base_profiles = generate_profiles(
+        Polygon([(0, 0), (100, 0), (100, 200), (0, 200)]),
+        azimuth_deg=0,
+        spacing_m=50,
+        extension_m=10,
+    )
+    mission = Polygon([(0, 50), (100, 50), (100, 150), (0, 150)])
+
+    profiles = profiles_for_zone(base_profiles, mission, 1e12, 1, extension_m=10)
+
+    assert profiles
+    assert all(profile.geometry.length == pytest.approx(120) for profile in profiles)
+    assert all(profile.geometry.bounds[1] == pytest.approx(40) for profile in profiles)
+    assert all(profile.geometry.bounds[3] == pytest.approx(160) for profile in profiles)
 
 
 def test_multipolygon_keeps_all_components() -> None:

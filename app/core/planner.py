@@ -306,7 +306,11 @@ def _build_regular_result(
                 continue
             geometry = normalize_polygon(clipped)
             profiles = profiles_for_zone(
-                base_profiles, geometry, 1e12, next_profile_id
+                base_profiles,
+                geometry,
+                1e12,
+                next_profile_id,
+                settings.profile_extension_m,
             )
             if profiles:
                 next_profile_id = profiles[-1].id + 1

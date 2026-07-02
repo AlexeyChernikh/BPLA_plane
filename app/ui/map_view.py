@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QSize, QTimer, QUrl, Signal
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from app.core.mission_colors import MISSION_COLORS
 
 
 class MapView(QWebEngineView):
@@ -36,6 +39,7 @@ class MapView(QWebEngineView):
             _HTML_TEMPLATE.replace(
                 "__GEOJSON__", json.dumps(feature_collection, ensure_ascii=False)
             )
+            .replace("__MISSION_COLORS__", json.dumps(MISSION_COLORS))
             .replace("__HOME__", json.dumps(home))
             .replace(
                 "__TERRAIN__",
@@ -59,6 +63,40 @@ class MapView(QWebEngineView):
             self._obsolete_html_paths.append(self._current_html_path)
         self._current_html_path = html_path
         self.setUrl(QUrl.fromLocalFile(str(html_path)))
+
+    def export_missions_png(
+        self,
+        path: str | Path,
+        finished: Callable[[Path | None, str | None], None],
+        size: QSize = QSize(1920, 1080),
+    ) -> None:
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        old_size = self.size()
+        old_minimum = self.minimumSize()
+        old_maximum = self.maximumSize()
+        self.setFixedSize(size)
+
+        def capture(_result=None) -> None:
+            pixmap = self.grab()
+            saved = pixmap.save(str(output), "PNG")
+
+            def restored(_restore_result=None) -> None:
+                self.setMinimumSize(old_minimum)
+                self.setMaximumSize(old_maximum)
+                self.resize(old_size)
+                if saved:
+                    finished(output, None)
+                else:
+                    finished(None, "Не удалось сохранить PNG карты.")
+
+            self.page().runJavaScript("restoreMissionExport()", restored)
+
+        def prepared(_result=None) -> None:
+            # Give Leaflet and remote map tiles time to redraw at Full HD size.
+            QTimer.singleShot(2500, capture)
+
+        self.page().runJavaScript("prepareMissionExport()", prepared)
 
     def _handle_title(self, title: str) -> None:
         if title.startswith("movehome:"):
@@ -128,6 +166,10 @@ _HTML_TEMPLATE = r"""
     .legend-tree details { margin-left:4px; }
     .legend-tree .missions { margin-left:18px; }
     .legend-tree .global { border-bottom:1px solid #bbb; padding-bottom:5px; margin-bottom:5px; }
+    .mission-export-label { background:rgba(255,255,255,.92); border:1px solid #555;
+      border-radius:3px; box-shadow:none; color:#111; font:bold 15px Arial,sans-serif;
+      padding:3px 6px; white-space:nowrap; }
+    body.export-mode .leaflet-control-container { display:none; }
   </style>
 </head>
 <body>
@@ -138,8 +180,7 @@ const map = L.map('map').setView([53.43, 96.56], 11);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; OpenStreetMap'
 }).addTo(map);
-const colors = ['#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00',
-                '#a65628','#f781bf','#999999','#66c2a5','#e6ab02'];
+const colors = __MISSION_COLORS__;
 const data = __GEOJSON__;
 const terrain = __TERRAIN__;
 const terrainLayer = terrain ? L.imageOverlay(
@@ -185,7 +226,7 @@ function missionEntry(zoneId, missionId) {
   return zone.missions[missionId];
 }
 function makeFeatureLayer(feature) {
-  return L.geoJSON(feature, {
+  const featureLayer = L.geoJSON(feature, {
     style:style,
     onEachFeature:(f, layer) => {
       const p = f.properties || {};
@@ -218,6 +259,8 @@ function makeFeatureLayer(feature) {
       return L.circleMarker(latlng);
     }
   });
+  featureLayer._missionProperties = feature.properties || {};
+  return featureLayer;
 }
 for (const feature of data.features || []) {
   const p = feature.properties || {};
@@ -305,6 +348,73 @@ hint.onAdd = () => {
   return div;
 };
 hint.addTo(map);
+let exportSnapshot = null;
+let exportLabels = [];
+function prepareMissionExport() {
+  exportSnapshot = {
+    globalState: JSON.parse(JSON.stringify(globalState)),
+    zones: {}
+  };
+  for (const [zoneId,zone] of Object.entries(zoneEntries)) {
+    exportSnapshot.zones[zoneId] = {enabled:zone.enabled, missions:{}};
+    for (const [missionId,mission] of Object.entries(zone.missions)) {
+      exportSnapshot.zones[zoneId].missions[missionId] = mission.enabled;
+    }
+  }
+  document.body.classList.add('export-mode');
+  globalState.dem = false;
+  globalState.polygon = false;
+  globalState.homes = false;
+  globalState.zones = false;
+  globalState.missions = true;
+  globalState.profiles = false;
+  globalState.routes = false;
+  const missionBounds = L.latLngBounds();
+  for (const zone of Object.values(zoneEntries)) {
+    zone.enabled = true;
+    for (const mission of Object.values(zone.missions)) {
+      mission.enabled = true;
+      for (const layer of mission.polygonLayers) {
+        if (layer.getBounds && layer.getBounds().isValid()) {
+          missionBounds.extend(layer.getBounds());
+        }
+        const p = layer._missionProperties || {};
+        if (p.label_lat !== undefined && p.label_lon !== undefined) {
+          const label = L.tooltip({
+            permanent:true, direction:'top', className:'mission-export-label'
+          }).setLatLng([p.label_lat,p.label_lon]).setContent(
+            'Зона ' + String(p.zone_id).padStart(3,'0') +
+            ' / Миссия ' + String(p.mission_id).padStart(3,'0')
+          ).addTo(map);
+          exportLabels.push(label);
+        }
+      }
+    }
+  }
+  refreshLayers();
+  if (missionBounds.isValid()) map.fitBounds(missionBounds, {padding:[70,70]});
+  map.invalidateSize();
+  return true;
+}
+function restoreMissionExport() {
+  for (const label of exportLabels) map.removeLayer(label);
+  exportLabels = [];
+  if (exportSnapshot) {
+    Object.assign(globalState, exportSnapshot.globalState);
+    for (const [zoneId,state] of Object.entries(exportSnapshot.zones)) {
+      zoneEntries[zoneId].enabled = state.enabled;
+      for (const [missionId,enabled] of Object.entries(state.missions)) {
+        zoneEntries[zoneId].missions[missionId].enabled = enabled;
+      }
+    }
+  }
+  exportSnapshot = null;
+  document.body.classList.remove('export-mode');
+  refreshLayers();
+  if (allBounds.isValid()) map.fitBounds(allBounds, {padding:[20,20]});
+  map.invalidateSize();
+  return true;
+}
 </script>
 </body>
 </html>

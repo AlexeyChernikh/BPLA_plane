@@ -10,6 +10,7 @@ from shapely.geometry import LineString, mapping
 from shapely.ops import transform
 
 from .kml_exporter import (
+    export_all_mission_polygons_kml,
     export_home_kml,
     export_polygon_kml,
     export_profiles_kml,
@@ -31,6 +32,15 @@ def export_all(result: PlanningResult, output_directory: str | Path) -> list[Pat
     zones_root.mkdir(parents=True, exist_ok=True)
     summary_root.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
+
+    if result.zones:
+        created.append(
+            export_all_mission_polygons_kml(
+                summary_root / "all_mission_polygons.kml",
+                result.zones,
+                result.settings.working_crs,
+            )
+        )
 
     if result.zones:
         for zone in result.zones:

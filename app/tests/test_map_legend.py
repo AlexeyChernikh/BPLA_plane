@@ -18,3 +18,12 @@ def test_map_requests_context_menu_for_every_mission_layer() -> None:
     assert "missioncontext:" in _HTML_TEMPLATE
     assert "p.zone_id" in _HTML_TEMPLATE
     assert "p.mission_id" in _HTML_TEMPLATE
+
+
+def test_map_has_clean_full_export_mode_with_mission_labels() -> None:
+    assert "prepareMissionExport" in _HTML_TEMPLATE
+    assert "restoreMissionExport" in _HTML_TEMPLATE
+    assert "mission-export-label" in _HTML_TEMPLATE
+    assert "label_lat" in _HTML_TEMPLATE
+    assert "Зона " in _HTML_TEMPLATE
+    assert "Миссия " in _HTML_TEMPLATE

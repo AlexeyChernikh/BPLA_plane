@@ -118,6 +118,9 @@ def test_project_round_trip_contains_complete_recalculation_session(
     snapshot.errors = []
     created = export_all(snapshot, tmp_path / "exported")
     assert created
+    assert (
+        tmp_path / "exported" / "summary" / "all_mission_polygons.kml"
+    ).exists()
 
     from app.ui import main_window
 

@@ -621,11 +621,33 @@ class MainWindow(QMainWindow):
 
     def _finish_export(self, created: object, directory: Path) -> None:
         paths = list(created)  # type: ignore[arg-type]
+        self.progress_label.setText("Создание PNG-карты…")
+        self.statusBar().showMessage("Создание PNG-карты…")
+        self.map_view.setEnabled(True)
+        self.map_view.export_missions_png(
+            directory / "summary" / "missions_map.png",
+            lambda path, error: self._finish_map_export(
+                paths, path, error, directory
+            ),
+        )
+
+    def _finish_map_export(
+        self,
+        paths: list[Path],
+        path: Path | None,
+        error: str | None,
+        directory: Path,
+    ) -> None:
+        if path is not None:
+            paths.append(path)
         self._clear_busy(f"Экспорт завершён: {len(paths)} файлов")
+        message = f"Создано файлов: {len(paths)}\n{directory}"
+        if error:
+            message += f"\n\nПредупреждение: {error}"
         QMessageBox.information(
             self,
             "Экспорт завершён",
-            f"Создано файлов: {len(paths)}\n{directory}",
+            message,
         )
 
     def _show_mission_context_menu(self, position) -> None:
@@ -940,6 +962,9 @@ def _result_geojson(result: PlanningResult) -> dict[str, object]:
     for mission in result.missions:
         zone = next(item for item in result.zones if item.id == mission.zone_id)
         if mission.zone is not None:
+            label_point = transform(
+                transformer.transform, mission.zone.representative_point()
+            )
             features.append(
                 {
                     "type": "Feature",
@@ -951,6 +976,8 @@ def _result_geojson(result: PlanningResult) -> dict[str, object]:
                         "grid_col": mission.grid_col,
                         "side_m": mission.nominal_side_m,
                         "edge_clipped": mission.edge_clipped,
+                        "label_lat": label_point.y,
+                        "label_lon": label_point.x,
                     },
                     "geometry": mapping(
                         transform(transformer.transform, mission.zone)

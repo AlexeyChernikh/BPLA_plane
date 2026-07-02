@@ -13,7 +13,8 @@ from shapely.geometry import (
     Polygon,
 )
 
-from .models import Profile
+from .mission_colors import kml_color, mission_color
+from .models import OperationalZone, Profile
 
 KML_NS = "http://www.opengis.net/kml/2.2"
 ET.register_namespace("", KML_NS)
@@ -40,6 +41,47 @@ def export_polygon_kml(
         poly_style = ET.SubElement(style, _tag("PolyStyle"))
         ET.SubElement(poly_style, _tag("color")).text = "5533aaff"
         _append_polygon(placemark, polygon, transformer)
+    return _write(path, document)
+
+
+def export_all_mission_polygons_kml(
+    path: str | Path,
+    zones: Sequence[OperationalZone],
+    working_crs: CRS | str | int,
+) -> Path:
+    document = _document("All mission polygons")
+    transformer = _transformer(working_crs)
+    for zone in zones:
+        folder = ET.SubElement(document, _tag("Folder"))
+        ET.SubElement(folder, _tag("name")).text = f"Зона {zone.id:03d}"
+        for mission in zone.missions:
+            geometry = mission.zone
+            if geometry is None or geometry.is_empty:
+                continue
+            color = mission_color(zone.id, mission.id)
+            polygons = (
+                [geometry]
+                if isinstance(geometry, Polygon)
+                else list(geometry.geoms)
+            )
+            for part_index, polygon in enumerate(polygons, start=1):
+                placemark = ET.SubElement(folder, _tag("Placemark"))
+                name = f"Зона {zone.id:03d} / Миссия {mission.id:03d}"
+                if len(polygons) > 1:
+                    name += f" / Часть {part_index}"
+                ET.SubElement(placemark, _tag("name")).text = name
+                ET.SubElement(placemark, _tag("description")).text = (
+                    f"Zone ID: {zone.id}; Mission ID: {mission.id}"
+                )
+                style = ET.SubElement(placemark, _tag("Style"))
+                line_style = ET.SubElement(style, _tag("LineStyle"))
+                ET.SubElement(line_style, _tag("color")).text = kml_color(color)
+                ET.SubElement(line_style, _tag("width")).text = "2"
+                poly_style = ET.SubElement(style, _tag("PolyStyle"))
+                ET.SubElement(poly_style, _tag("color")).text = kml_color(
+                    color, "88"
+                )
+                _append_polygon(placemark, polygon, transformer)
     return _write(path, document)
 
 
